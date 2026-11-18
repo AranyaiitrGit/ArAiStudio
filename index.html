@@ -375,8 +375,8 @@ body.sb-closed #menuBtn{display:grid}
   <h2 style="font-size:calc(var(--fs) + 1px)">Sync (GitHub Gist)</h2>
   <div class="frow"><label>PAT <span class="lbl-hint">(gist scope)</span></label><input id="sSyncToken" type="password" placeholder="ghp_..." spellcheck="false"></div>
   <div class="frow"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="sSyncRemember" style="width:auto;accent-color:var(--accent)"> Remember on this device</label></div>
-  <div class="frow" style="display:flex;gap:8px"><button class="btn sm" id="sSyncPush">Sync now</button><button class="btn sm" id="sSyncPull">Pull now</button></div>
-  <div id="syncStatus" class="models-status">Not synced.</div>
+  <div class="frow" style="display:flex;flex-wrap:wrap;gap:8px"><button class="btn sm" id="sSyncPush">Sync now</button><button class="btn sm" id="sSyncPull">Pull now</button><button class="btn sm" id="sSyncFind">Find best backup</button></div>
+  <div id="syncStatus" class="models-status">Not synced.</div><p class="models-status" style="line-height:1.55;color:var(--t2)">This sync includes your API key and research data. Unlisted Gists are not private. Use only revocable lab keys; do not share the Gist URL or PAT.</p>
   <div class="mbtns"><button class="btn" id="sCancel">Cancel</button><button class="btn pri" id="sSave">Save</button></div>
   <div class="credit">MiSans by Xiaomi (MiSans IP License) | Consolas / Intel One Mono (SIL OFL)</div>
 </div></div>
@@ -387,6 +387,17 @@ body.sb-closed #menuBtn{display:grid}
 <div class="overlay" id="imgOverlay"><img id="imgPreview" alt="preview"></div>
 <div class="overlay" id="helpOverlay"><div class="modal" style="width:480px"><h2>Shortcuts</h2><div class="kbd-list"><kbd>Ctrl+K</kbd><span>New chat</span><kbd>Ctrl+Shift+C</kbd><span>Copy last response</span><kbd>Enter</kbd><span>Send</span><kbd>Shift+Enter</kbd><span>New line</span><kbd>Esc</kbd><span>Close panels</span><kbd>?</kbd><span>Help</span></div><div class="credit" style="text-align:left;margin-top:18px">Upload skills as .md / .zip / .skill files. Paste or drop images and research files. Star responses for notes. Sync via GitHub Gist.</div><div class="mbtns"><button class="btn pri" id="helpClose">Got it</button></div></div></div>
 <div class="overlay" id="previewOverlay"><iframe id="previewFrame" sandbox="allow-scripts"></iframe></div>
+<div class="overlay" id="syncConflictOverlay" style="z-index:150"><div class="modal" style="width:min(600px,94vw)">
+  <h2>Sync conflict detected</h2>
+  <p id="syncConflictMessage" style="line-height:1.65;color:var(--t2);margin-bottom:12px"></p>
+  <p style="font-size:12px;line-height:1.65;color:var(--t2)">Merge keeps your device settings and retains differing cloud chats as separate copies. Use cloud replaces this device's data; keep device replaces the Gist. Nothing is overwritten without your choice.</p>
+  <div class="mbtns" style="flex-wrap:wrap;justify-content:stretch">
+    <button class="btn" id="syncConflictCancel">Cancel</button>
+    <button class="btn" id="syncConflictCloud">Use cloud</button>
+    <button class="btn" id="syncConflictLocal">Keep device</button>
+    <button class="btn pri" id="syncConflictMerge">Merge copies</button>
+  </div>
+</div></div>
 <div id="toast"></div>
 <input type="file" id="fileInput" hidden multiple accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.py,.pyi,.v,.vh,.sv,.svh,.vhd,.vhdl,.md,.markdown,.rst,.tex,.bib,.sty,.cls,.bst,.txt,.log,.rpt,.tcl,.sdc,.xdc,.lib,.lef,.def,.sdf,.spef,.vcd,.sp,.spice,.cir,.cdl,.scs,.m,.r,.jl,.f,.lst,.list,.csv,.tsv,.json,.jsonl,.ndjson,.ipynb,.yaml,.yml,.toml,.ini,.cfg,.xml,.html,.css,.js,.jsx,.ts,.tsx,.c,.h,.cc,.cpp,.hpp,.java,.go,.rs,.sh,.bash,.zsh,.ps1,.sql,.diff,.patch,.pdf,.docx,.pptx,.xlsx,.xls">
 <input type="file" id="skillFileInput" hidden multiple accept=".md,.skill,.zip,.txt,.markdown">
@@ -424,9 +435,9 @@ var settings=Object.assign({},DEF,load('mimo.settings',{}));
 try{var tk=sessionStorage.getItem('mimo.apiKey');if(tk!==null)settings.key=tk;else if(settings.key)sessionStorage.setItem('mimo.apiKey',settings.key)}catch(e){}
 function saveSettings(){var p=Object.assign({},settings);delete p.key;save('mimo.settings',p);try{sessionStorage.setItem('mimo.apiKey',settings.key||'')}catch(e){}}
 saveSettings();
-var syncState={gistId:load('mimo.gistId',''),lastSync:load('mimo.lastSync',0)};
+var syncState={gistId:load('mimo.gistId',''),lastSync:load('mimo.lastSync',0),baseDigest:load('mimo.syncBaseDigest','')};
 function getSyncToken(){return sessionStorage.getItem('mimo.syncToken')||localStorage.getItem('mimo.syncToken')||''}
-function setSyncToken(t,r){try{if(r){localStorage.setItem('mimo.syncToken',t);sessionStorage.removeItem('mimo.syncToken')}else{sessionStorage.setItem('mimo.syncToken',t);localStorage.removeItem('mimo.syncToken')}}catch(e){}}
+function setSyncToken(t,r){try{var previous=getSyncToken();if(previous&&previous!==t){syncState.gistId='';syncState.baseDigest='';save('mimo.gistId','');save('mimo.syncBaseDigest','')}if(r){localStorage.setItem('mimo.syncToken',t);sessionStorage.removeItem('mimo.syncToken')}else{sessionStorage.setItem('mimo.syncToken',t);localStorage.removeItem('mimo.syncToken')}}catch(e){}}
 
 /* ===== skills ===== */
 var SKILL_SEED=[
@@ -1120,7 +1131,7 @@ function openSettings(){
   updateSyncStatus();$('#settingsOverlay').classList.add('open');renderModelChoices();
   if(settings.key)loadModelsFromForm(false);else modelStatus('Enter key then refresh.');
 }
-function updateSyncStatus(){var e=$('#syncStatus');e.textContent=syncState.gistId?('Gist: '+syncState.gistId+' | Last: '+(syncState.lastSync?new Date(syncState.lastSync).toLocaleString():'never')):'Not synced.'}
+function updateSyncStatus(message){if(message!==undefined)syncState.notice=message;var e=$('#syncStatus');e.textContent=syncState.notice||(syncState.gistId?('Gist: '+syncState.gistId+' | Last verified: '+(syncState.lastSync?new Date(syncState.lastSync).toLocaleString():'never')):'No Gist linked yet. Existing backup will be discovered.')}
 $('#settingsBtn').onclick=openSettings;$('#settingsBtn2').onclick=openSettings;
 $('#sCancel').onclick=function(){if(previousFontSize!==null){settings.fs=previousFontSize;applyFont()}$('#settingsOverlay').classList.remove('open')};
 $('#sFs').oninput=function(e){settings.fs=+e.target.value;$('#sFsVal').textContent=e.target.value;applyFont()};
@@ -1131,23 +1142,16 @@ $('#sSave').onclick=function(){
   if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);
   $('#settingsOverlay').classList.remove('open');
   toast('Settings saved');
-  /* auto-sync: if gist exists, pull to get everything; if not, push to create */
-  if(getSyncToken()){
-    if(syncState.gistId){
-      toast('Pulling from sync...');
-      syncPull();
-    }else{
-      toast('Creating sync backup...');
-      syncPush();
-    }
-  }
+  /* Discover and pull from the existing Gist BEFORE considering any upload. */
+  if(getSyncToken())syncAfterTokenSaved();
 };
 $('#fetchModelsBtn').onclick=function(){loadModelsFromForm(true)};
 $('#sModelSearch').oninput=renderModelChoices;$('#sModel').oninput=renderModelChoices;
 $('#sBase').addEventListener('input',function(){renderModelChoices();modelStatus('Endpoint changed. Refresh.')});
 $('#sKey').addEventListener('input',function(){renderModelChoices();modelStatus('Key changed. Refresh.')});
-$('#sSyncPush').onclick=function(){var tok=$('#sSyncToken').value.trim();if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);syncPush()};
-$('#sSyncPull').onclick=function(){syncPull()};
+$('#sSyncPush').onclick=function(){var tok=$('#sSyncToken').value.trim();if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);syncPush(false)};
+$('#sSyncPull').onclick=function(){var tok=$('#sSyncToken').value.trim();if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);syncPull(false)};
+$('#sSyncFind').onclick=function(){var tok=$('#sSyncToken').value.trim();if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);if(syncBusy)return toast('Sync already in progress');syncSetGistId('');syncPull(false)};
 
 /* ===== research brief ===== */
 $('#researchBtn').onclick=function(){var c=getChat()||newChat();$('#rContext').value=c.brief||'';$('#researchOverlay').classList.add('open');$('#rContext').focus()};
@@ -1155,28 +1159,341 @@ $('#rCancel').onclick=function(){$('#researchOverlay').classList.remove('open')}
 $('#rSave').onclick=function(){var c=getChat();if(!c)return;c.brief=$('#rContext').value.trim();saveChats();renderThread();$('#researchOverlay').classList.remove('open');toast('Brief saved')};
 $('#rClear').onclick=function(){$('#rContext').value='';var c=getChat();if(c){c.brief='';saveChats()}renderThread();$('#researchOverlay').classList.remove('open');toast('Brief cleared')};
 
-/* ===== sync ===== */
-var syncTimer=null;
-function scheduleSyncPush(){if(syncTimer)clearTimeout(syncTimer);syncTimer=setTimeout(function(){syncPush()},25000)}
-function buildSyncPayload(){var pub=Object.assign({},settings);return{version:1,syncedAt:Date.now(),chats:chats,notes:notes,skills:skills,skillOn:skillOn,settings:pub,activeId:activeId}}
+/* ===== Cross-device Gist sync (verified, conflict-aware) ===== */
+var syncTimer=null, syncBusy=false, syncApplying=false, syncHooksOn=false;
+var syncConflictResolve=null;
+var SYNC_FILE='studio-sync.json', SYNC_PART_PREFIX='studio-sync-part-';
+var SYNC_PART_SIZE=190000, SYNC_PART_LIMIT=100;
+
+function syncDigest(data){
+  /* Non-cryptographic change detection, not an authentication mechanism. */
+  var s=JSON.stringify({chats:data.chats,notes:data.notes,skills:data.skills,skillOn:data.skillOn,
+    templates:data.templates,settings:data.settings});
+  var h=2166136261;
+  for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}
+  return s.length.toString(36)+'-'+(h>>>0).toString(16);
+}
+function syncCounts(data){
+  return (data.chats||[]).length+' chats, '+(data.notes||[]).length+' notes, '+(data.skills||[]).length+' skills';
+}
+function syncMeaningful(data){
+  if(!data||typeof data!=='object')return false;
+  if((data.chats||[]).some(function(c){return !!((c.messages&&c.messages.length)||(c.brief&&c.brief.trim()))}))return true;
+  if((data.notes||[]).length)return true;
+  if((data.skills||[]).some(function(s){return !!s.custom}))return true;
+  if((data.skillOn||[]).length)return true;
+  if((data.templates||[]).some(function(t){return !!t.custom}))return true;
+  var s=data.settings||{};
+  return !!(s.key||s.sys||((s.base||DEF.base)!==DEF.base)||((s.model||DEF.model)!==DEF.model));
+}
+function syncValidate(data,allowEmpty){
+  if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('Backup is not a JSON object');
+  if(data.version!==1&&data.version!==2)throw new Error('Unsupported backup format/version');
+  ['chats','notes','skills','skillOn'].forEach(function(k){if(!Array.isArray(data[k]))throw new Error('Invalid backup: '+k+' is missing or not an array')});
+  if(!data.settings||typeof data.settings!=='object'||Array.isArray(data.settings))throw new Error('Invalid backup: settings are missing');
+  if(data.templates!==undefined&&!Array.isArray(data.templates))throw new Error('Invalid backup: templates are not an array');
+  if(data.chats.some(function(c){return !c||typeof c!=='object'||!Array.isArray(c.messages)}))throw new Error('Invalid chat records in backup');
+  if(!allowEmpty&&!syncMeaningful(data))throw new Error('Remote backup is empty. Nothing was applied.');
+  return data;
+}
+function buildSyncPayload(){
+  /* Explicitly include the API key in the backup, as requested. The Gist is NOT encrypted. */
+  var pub=Object.assign({},settings);
+  return {version:2,syncedAt:Date.now(),chats:chats,notes:notes,skills:skills,skillOn:skillOn,
+    templates:TPL,settings:pub,activeId:activeId};
+}
+function syncSetGistId(id){
+  if(syncState.gistId!==(id||'')){syncState.baseDigest='';save('mimo.syncBaseDigest','')}
+  syncState.gistId=id||'';
+  save('mimo.gistId',syncState.gistId);
+}
+function syncSetBaseline(data){
+  syncState.baseDigest=syncDigest(data);
+  syncState.lastSync=Date.now();
+  syncState.notice='';
+  save('mimo.syncBaseDigest',syncState.baseDigest);
+  save('mimo.lastSync',syncState.lastSync);
+  updateSyncStatus();
+}
+function scheduleSyncPush(){
+  if(!syncHooksOn||syncApplying||!getSyncToken())return;
+  if(syncTimer)clearTimeout(syncTimer);
+  syncTimer=setTimeout(function(){syncTimer=null;syncPush(true)},25000);
+}
+function syncHeaders(token){return {'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':'2022-11-28'}}
+async function syncRequest(token,url,opts){
+  opts=opts||{};
+  var headers=Object.assign({},syncHeaders(token),opts.headers||{});
+  var res=await fetch(url,Object.assign({},opts,{headers:headers,cache:'no-store'}));
+  if(!res.ok){var t='';try{var j=await res.json();t=(j&&j.message)||JSON.stringify(j).slice(0,150)}catch(e){}
+    throw new Error('GitHub HTTP '+res.status+(t?': '+t:''));}
+  return res.json();
+}
+/* Discover by file name, including older backups. Never create a new Gist until discovery succeeds. */
+function syncValueScore(data){
+  if(!syncMeaningful(data))return -1;
+  var total=(data.chats||[]).reduce(function(n,c){return n+(c.messages?c.messages.length:0)},0);
+  var custom=(data.skills||[]).filter(function(s){return !!s.custom}).length;
+  var tc=(data.templates||[]).filter(function(t){return !!t.custom}).length;
+  return total*1000+(data.chats||[]).length*100+(data.notes||[]).length*80+custom*60+
+    (data.skillOn||[]).length*30+tc*20+((data.settings||{}).key?10:0);
+}
+async function discoverGist(token){
+  var matches=[];
+  for(var page=1;page<=10;page++){
+    var list=await syncRequest(token,'https://api.github.com/gists?per_page=100&page='+page);
+    if(!Array.isArray(list))throw new Error('Unexpected response while searching your Gists');
+    list.forEach(function(g){if(g&&g.files&&g.files[SYNC_FILE])matches.push(g)});
+    if(list.length<100)break;
+  }
+  if(!matches.length)return '';
+  if(matches.length>30)throw new Error('Too many duplicate AI Studio Gists. Please clean up duplicates on GitHub.');
+  if(matches.length>1){
+    /* Older mobile builds could create a newer but empty Gist. Prefer real research content. */
+    for(var i=0;i<matches.length;i++){
+      try{
+        var full=await syncRequest(token,'https://api.github.com/gists/'+encodeURIComponent(matches[i].id));
+        matches[i].score=syncValueScore(await syncReadPayload(token,full));
+      }catch(e){matches[i].score=-2}
+    }
+    matches.sort(function(a,b){return (b.score||0)-(a.score||0)||Date.parse(b.updated_at||0)-Date.parse(a.updated_at||0)});
+    if(matches[0].score===-2)throw new Error('Found AI Studio Gists, but none contain valid backup JSON');
+    toast('Found '+matches.length+' sync Gists; selected '+(matches[0].score<0?'empty legacy':'populated')+' backup');
+  }
+  syncSetGistId(matches[0].id);
+  return matches[0].id;
+}
+async function syncFindRemote(token){
+  var gid=syncState.gistId;
+  /* A legacy device may cache a newly-created EMPTY Gist; rescan on first upgraded sync. */
+  if(!syncState.baseDigest){
+    gid=await discoverGist(token);
+    return gid?syncRequest(token,'https://api.github.com/gists/'+encodeURIComponent(gid)):null;
+  }
+  if(gid){
+    try{
+      var g=await syncRequest(token,'https://api.github.com/gists/'+encodeURIComponent(gid));
+      if(g.files&&g.files[SYNC_FILE])return g;
+      syncSetGistId('');
+    }catch(e){
+      if(!/GitHub HTTP (403|404)(?:\D|$)/.test(e.message))throw e;
+      syncSetGistId('');
+    }
+  }
+  gid=await discoverGist(token);
+  return gid?syncRequest(token,'https://api.github.com/gists/'+encodeURIComponent(gid)):null;
+}
+async function syncReadFile(token,file,name){
+  if(!file)throw new Error('Missing backup file '+name);
+  if(typeof file.content==='string'&&!file.truncated)return file.content;
+  if(!file.raw_url)throw new Error('File '+name+' is truncated and cannot be retrieved');
+  var res=await fetch(file.raw_url,{cache:'no-store'});
+  if(!res.ok)throw new Error('Could not download large Gist file '+name+': HTTP '+res.status);
+  return res.text();
+}
+async function syncReadPayload(token,gist){
+  var files=gist&&gist.files||{},head=files[SYNC_FILE];
+  if(!head)throw new Error('This Gist has no '+SYNC_FILE);
+  var main;
+  try{main=JSON.parse(await syncReadFile(token,head,SYNC_FILE))}catch(e){throw new Error('Invalid Gist JSON: '+e.message)}
+  if(main&&main.format==='ai-studio-chunks-v1'){
+    if(!Number.isInteger(main.parts)||main.parts<1||main.parts>SYNC_PART_LIMIT)throw new Error('Invalid backup chunk count');
+    var segments=[];
+    for(var i=0;i<main.parts;i++){
+      var name=SYNC_PART_PREFIX+String(i).padStart(3,'0')+'.txt';
+      segments.push(await syncReadFile(token,files[name],name));
+    }
+    var raw=segments.join('');
+    if(raw.length!==main.length)throw new Error('Incomplete Gist backup: length mismatch');
+    try{main=JSON.parse(raw)}catch(e){throw new Error('Corrupted chunked backup: '+e.message)}
+  }
+  return syncValidate(main,true);
+}
+function syncFilesForPayload(payload,oldGist){
+  var raw=JSON.stringify(payload),files={},currentParts=[];
+  if(raw.length<=SYNC_PART_SIZE){files[SYNC_FILE]={content:raw}}
+  else{
+    var num=Math.ceil(raw.length/SYNC_PART_SIZE);
+    if(num>SYNC_PART_LIMIT)throw new Error('Backup too large for one Gist ('+num+' files needed). Export a local JSON backup.');
+    files[SYNC_FILE]={content:JSON.stringify({format:'ai-studio-chunks-v1',version:1,parts:num,length:raw.length})};
+    for(var i=0;i<num;i++){
+      var name=SYNC_PART_PREFIX+String(i).padStart(3,'0')+'.txt';
+      currentParts.push(name);files[name]={content:raw.slice(i*SYNC_PART_SIZE,(i+1)*SYNC_PART_SIZE)};
+    }
+  }
+  var old=oldGist&&oldGist.files||{};
+  Object.keys(old).forEach(function(name){
+    if(name.indexOf(SYNC_PART_PREFIX)===0&&currentParts.indexOf(name)===-1)files[name]=null;
+  });
+  return files;
+}
+async function syncWrite(token,payload,remote){
+  var update=!!remote,body={description:'AI Studio sync (contains confidential research and API keys)',files:syncFilesForPayload(payload,remote)};
+  if(!update)body.public=false;
+  var url=update?'https://api.github.com/gists/'+encodeURIComponent(remote.id):'https://api.github.com/gists';
+  var gist=await syncRequest(token,url,{method:update?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!gist.id)throw new Error('GitHub did not return a Gist ID');
+  syncSetGistId(gist.id);syncSetBaseline(payload);
+  toast((update?'Synced changes':'Created sync backup')+' · '+syncCounts(payload));
+  return gist;
+}
 function applySyncPayload(data){
-  if(data.chats)chats=data.chats;if(data.notes)notes=data.notes;if(data.skills)skills=data.skills;if(data.skillOn)skillOn=data.skillOn;
-  if(data.settings){settings=Object.assign({},DEF,data.settings);if(!settings.key&&data.settings.key)settings.key=data.settings.key;saveSettings();applyTheme();applyFont();renderProfile();renderModelLabel()}
-  if(data.activeId)activeId=data.activeId;
-  saveChats();saveNotes();persistSkills();renderSidebar();renderThread();renderSkills();renderSkillBar();renderNotes();
+  syncValidate(data);
+  if(streaming)throw new Error('Stop the current model response before pulling a backup');
+  syncApplying=true;
+  try{
+    chats=data.chats;
+    notes=data.notes;
+    skills=data.skills;
+    skillOn=data.skillOn;
+    if(Array.isArray(data.templates))TPL=data.templates;
+    var oldKey=settings.key||'';
+    settings=Object.assign({},DEF,data.settings);
+    if(!Object.prototype.hasOwnProperty.call(data.settings,'key'))settings.key=oldKey;
+    activeId=data.activeId&&chats.some(function(c){return c.id===data.activeId})?data.activeId:(chats[0]?chats[0].id:null);
+    pendingAttachments=[];renderAttachmentTray();
+    saveSettings();saveChats();saveNotes();persistSkills();saveTpls();
+    applyTheme();applyFont();renderProfile();renderModelLabel();renderSidebar();renderThread();
+    renderSkills();renderSkillBar();renderNotes();
+    if($('#settingsOverlay').classList.contains('open')){
+      $('#sBase').value=settings.base;$('#sKey').value=settings.key||'';$('#sModel').value=settings.model;
+      $('#sTemp').value=settings.temp;$('#sMax').value=settings.maxTok;$('#sSys').value=settings.sys;
+      $('#sStream').value=settings.stream?'1':'0';$('#sTheme').value=settings.theme;
+      $('#sName').value=settings.name;$('#sPlan').value=settings.plan;
+      $('#sFs').value=settings.fs;$('#sFsVal').textContent=settings.fs;
+      $('#sMulti').checked=!!settings.multi;
+      renderModelChoices();
+    }
+    return true;
+  }finally{syncApplying=false}
 }
-function syncPush(){
-  var token=getSyncToken();if(!token){toast('No sync token. Add PAT in settings.');return}
-  var payload=buildSyncPayload();var content=JSON.stringify(payload);
-  var body={description:'AI Studio sync',files:{'studio-sync.json':{content:content}}};
-  var isUpdate=!!syncState.gistId;
-  var url=isUpdate?'https://api.github.com/gists/'+syncState.gistId:'https://api.github.com/gists';
-  fetch(url,{method:isUpdate?'PATCH':'POST',headers:{'Authorization':'token '+token,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(res){if(!res.ok)throw new Error('HTTP '+res.status);return res.json()}).then(function(data){if(!syncState.gistId){syncState.gistId=data.id;save('mimo.gistId',data.id)}syncState.lastSync=Date.now();save('mimo.lastSync',syncState.lastSync);updateSyncStatus();toast('Synced')}).catch(function(e){toast('Sync failed: '+((e&&e.message)||e))});
+function syncMergeUnique(local,remote,idField){
+  var result=local.slice(),existing={};
+  result.forEach(function(item){if(item&&item[idField])existing[item[idField]]=item});
+  remote.forEach(function(item){
+    if(!item)return;
+    var copy=JSON.parse(JSON.stringify(item)),id=copy[idField];
+    if(!id||!existing[id]){result.push(copy);if(id)existing[id]=copy;return;}
+    if(JSON.stringify(existing[id])===JSON.stringify(copy))return;
+    copy[idField]=uid();
+    if(copy.title)copy.title+=' (cloud copy)';
+    else if(copy.name)copy.name+=' (cloud copy)';
+    result.push(copy);
+  });
+  return result;
 }
-function syncPull(){
-  var token=getSyncToken();if(!token||!syncState.gistId){toast('Sync not configured');return}
-  fetch('https://api.github.com/gists/'+syncState.gistId,{headers:{'Authorization':'token '+token}}).then(function(res){if(!res.ok)throw new Error('HTTP '+res.status);return res.json()}).then(function(data){var file=data.files&&data.files['studio-sync.json'];if(!file)throw new Error('No sync file');applySyncPayload(JSON.parse(file.content));toast('Pulled')}).catch(function(e){toast('Pull failed: '+((e&&e.message)||e))});
+function syncMergeRemote(data){
+  syncApplying=true;
+  try{
+    chats=syncMergeUnique(chats,data.chats,'id');
+    notes=syncMergeUnique(notes,data.notes,'id');
+    skills=syncMergeUnique(skills,data.skills,'id');
+    skillOn=Array.from(new Set(skillOn.concat(data.skillOn)));
+    if(Array.isArray(data.templates))TPL=syncMergeUnique(TPL,data.templates,'id');
+    /* Keep this device's settings; recover its missing API key from cloud. */
+    if(!settings.key&&data.settings.key)settings.key=data.settings.key;
+    saveChats();saveNotes();persistSkills();saveTpls();saveSettings();
+    applyTheme();applyFont();renderProfile();renderModelLabel();renderSidebar();renderThread();
+    renderSkills();renderSkillBar();renderNotes();
+  }finally{syncApplying=false}
 }
+function syncConflictDialog(local,remote){
+  return new Promise(function(resolve){
+    var overlay=$('#syncConflictOverlay');
+    $('#syncConflictMessage').textContent='This device: '+syncCounts(local)+' · Cloud: '+syncCounts(remote)+'. Both copies contain changes. Choose how to reconcile them.';
+    syncConflictResolve=function(choice){syncConflictResolve=null;overlay.classList.remove('open');resolve(choice)};
+    overlay.classList.add('open');
+  });
+}
+['Cancel','Merge','Cloud','Local'].forEach(function(name){
+  $('#syncConflict'+name).onclick=function(){if(syncConflictResolve)syncConflictResolve(name.toLowerCase())};
+});
+/* One sync transaction at a time; all writes inspect the remote backup first. */
+async function syncRun(mode,automatic){
+  var token=getSyncToken();
+  if(!token){if(!automatic)toast('No sync token. Add a GitHub PAT in Settings.');return false}
+  if(syncBusy){if(!automatic)toast('Sync already in progress');return false}
+  if(streaming){if(!automatic)toast('Stop the current response before syncing');return false}
+  syncBusy=true;
+  if(syncTimer){clearTimeout(syncTimer);syncTimer=null}
+  updateSyncStatus('Checking GitHub backup...');
+  try{
+    var remote=await syncFindRemote(token),local=buildSyncPayload();
+    if(!remote){
+      if(mode==='pull'||!syncMeaningful(local)){
+        updateSyncStatus('No existing AI Studio Gist found');
+        if(!automatic)toast('No sync backup found in this GitHub account');
+        return false;
+      }
+      await syncWrite(token,local,null);return true;
+    }
+    var data=await syncReadPayload(token,remote);
+    if(!syncMeaningful(data)){
+      if(mode==='push'&&syncMeaningful(local)){await syncWrite(token,local,remote);return true}
+      updateSyncStatus('Remote backup is empty; local data was not modified');
+      if(!automatic)toast('Cloud backup is empty; nothing pulled');
+      return false;
+    }
+    var wasMeaningful=syncMeaningful(local);
+    /* On a new tab, the tab-scoped API key may be empty. Restore it before deciding what changed. */
+    if(!settings.key&&data.settings&&data.settings.key){
+      syncApplying=true;try{settings.key=data.settings.key;saveSettings();if($('#settingsOverlay').classList.contains('open'))$('#sKey').value=settings.key}finally{syncApplying=false}
+      local=buildSyncPayload();
+    }
+    var ld=syncDigest(local),rd=syncDigest(data),base=syncState.baseDigest;
+    /* Never upload an empty freshly initialized device over a meaningful cloud backup. */
+    if(!wasMeaningful&&syncMeaningful(data)){
+      applySyncPayload(data);syncSetBaseline(data);toast('Restored from GitHub · '+syncCounts(data));return true;
+    }
+    if(ld===rd){syncSetBaseline(data);if(!automatic)toast('Already in sync · '+syncCounts(data));return true}
+    var localChanged=base?ld!==base:wasMeaningful;
+    var remoteChanged=base?rd!==base:syncMeaningful(data);
+    if(!localChanged&&remoteChanged){
+      applySyncPayload(data);syncSetBaseline(data);toast('Restored from GitHub · '+syncCounts(data));return true;
+    }
+    if(localChanged&&!remoteChanged){
+      /* On an explicit Pull, never silently replace remote data with local. */
+      if(mode==='pull'){toast('Cloud backup unchanged; local changes retained. Use Sync now to upload.');return false}
+      await syncWrite(token,buildSyncPayload(),remote);return true;
+    }
+    var choice=await syncConflictDialog(local,data);
+    if(choice==='cancel'){updateSyncStatus('Conflict: no data overwritten');return false}
+    if(choice==='cloud'){
+      applySyncPayload(data);syncSetBaseline(data);toast('Cloud restored · '+syncCounts(data));return true;
+    }
+    if(choice==='local'){
+      if(!confirm('Overwrite cloud backup with this device\'s data? The existing cloud version will be replaced.')){
+        updateSyncStatus('Cloud backup unchanged');return false;
+      }
+      await syncWrite(token,buildSyncPayload(),remote);return true;
+    }
+    if(choice==='merge'){
+      syncMergeRemote(data);
+      await syncWrite(token,buildSyncPayload(),remote);
+      toast('Merged without discarding either chat copy');return true;
+    }
+    return false;
+  }catch(e){
+    updateSyncStatus('Sync error: '+(e&&e.message||e));
+    toast('Sync failed: '+(e&&e.message||e));return false;
+  }finally{syncBusy=false;updateSyncStatus()}
+}
+function syncPush(automatic){return syncRun('push',!!automatic)}
+function syncPull(automatic){return syncRun('pull',!!automatic)}
+/* A newly entered PAT must pull an existing backup, not immediately create a new one. */
+async function syncAfterTokenSaved(){
+  if(!getSyncToken())return;
+  var result=await syncPull(true);
+  if(result||syncBusy)return;
+  /* syncPull returns false for no remote; check again using the same account and create only if it truly has no backup. */
+  if(!syncState.gistId&&syncMeaningful(buildSyncPayload()))await syncPush(true);
+}
+/* Hook persistent data writes so saved skills, notes, templates and settings all auto-sync. */
+var syncOriginalSave=save;
+save=function(k,v){
+  syncOriginalSave(k,v);
+  if(syncHooksOn&&!syncApplying&&/^(mimo\.(chats|active|notes|skills|skillOn|settings|tpls))$/.test(k))scheduleSyncPush();
+};
 
 /* ===== theme & help ===== */
 $('#themeBtn').onclick=function(){settings.theme=(settings.theme==='dark')?'light':'dark';saveSettings();applyTheme()};
@@ -1196,16 +1513,18 @@ document.addEventListener('keydown',function(e){
   var k=String(e.key||'').toLowerCase();
   if((e.ctrlKey||e.metaKey)&&k==='k'){e.preventDefault();newChat()}
   if((e.ctrlKey||e.metaKey)&&e.shiftKey&&k==='c'){var c=getChat(),last=null,i;if(c){for(i=c.messages.length-1;i>=0;i--){if(c.messages[i].role==='assistant'&&c.messages[i].content){last=c.messages[i];break}}}if(last){e.preventDefault();copyTxt(last.content,'Last response copied')}}
-  if(k==='escape'){closeMenus();hideSel();$('#notesPanel').classList.remove('open');document.querySelectorAll('.overlay').forEach(function(o){o.classList.remove('open')})}
+  if(k==='escape'){if(syncConflictResolve)syncConflictResolve('cancel');closeMenus();hideSel();$('#notesPanel').classList.remove('open');document.querySelectorAll('.overlay').forEach(function(o){o.classList.remove('open')})}
   if(k==='?'&&!typing){e.preventDefault();$('#helpOverlay').classList.toggle('open')}
 });
-document.querySelectorAll('.overlay').forEach(function(o){o.addEventListener('click',function(e){if(e.target===o)o.classList.remove('open')})});
+document.querySelectorAll('.overlay').forEach(function(o){o.addEventListener('click',function(e){if(e.target===o){if(o.id==='syncConflictOverlay'&&syncConflictResolve)syncConflictResolve('cancel');else o.classList.remove('open')}})});
 
 /* ===== boot + self-test ===== */
 try{
   applyTheme();applyFont();renderProfile();renderModelLabel();renderSkills();renderSkillBar();renderNotes();
   if(!chats.length)newChat();else{if(!getChat())activeId=chats[0].id;renderSidebar();renderThread()}
   renderAttachmentTray();setSend();updateStats();
+  syncHooksOn=true;
+  if(getSyncToken())setTimeout(function(){syncPull(true)},800);
   var warn=[];if(!HAS_MARKED)warn.push('markdown');if(!HAS_KATEX)warn.push('math');if(!HAS_HLJS)warn.push('highlight');
   if(warn.length)toast('CDN blocked ('+warn.join(', ')+')');
   else if(!storeOK)toast('Storage blocked - in-memory session');
