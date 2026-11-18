@@ -1124,7 +1124,24 @@ function updateSyncStatus(){var e=$('#syncStatus');e.textContent=syncState.gistI
 $('#settingsBtn').onclick=openSettings;$('#settingsBtn2').onclick=openSettings;
 $('#sCancel').onclick=function(){if(previousFontSize!==null){settings.fs=previousFontSize;applyFont()}$('#settingsOverlay').classList.remove('open')};
 $('#sFs').oninput=function(e){settings.fs=+e.target.value;$('#sFsVal').textContent=e.target.value;applyFont()};
-$('#sSave').onclick=function(){Object.assign(settings,{base:$('#sBase').value.trim()||DEF.base,key:$('#sKey').value.trim(),model:$('#sModel').value.trim()||DEF.model,temp:$('#sTemp').value,maxTok:$('#sMax').value,sys:$('#sSys').value,stream:$('#sStream').value==='1',theme:$('#sTheme').value,name:$('#sName').value.trim()||'User',plan:$('#sPlan').value.trim(),fs:+$('#sFs').value,multi:$('#sMulti').checked});saveSettings();applyTheme();applyFont();renderProfile();renderModelLabel();var tok=$('#sSyncToken').value.trim();if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);$('#settingsOverlay').classList.remove('open');toast('Settings saved')};
+$('#sSave').onclick=function(){
+  Object.assign(settings,{base:$('#sBase').value.trim()||DEF.base,key:$('#sKey').value.trim(),model:$('#sModel').value.trim()||DEF.model,temp:$('#sTemp').value,maxTok:$('#sMax').value,sys:$('#sSys').value,stream:$('#sStream').value==='1',theme:$('#sTheme').value,name:$('#sName').value.trim()||'User',plan:$('#sPlan').value.trim(),fs:+$('#sFs').value,multi:$('#sMulti').checked});
+  saveSettings();applyTheme();applyFont();renderProfile();renderModelLabel();
+  var tok=$('#sSyncToken').value.trim();
+  if(tok&&tok!=='***stored***')setSyncToken(tok,$('#sSyncRemember').checked);
+  $('#settingsOverlay').classList.remove('open');
+  toast('Settings saved');
+  /* auto-sync: if gist exists, pull to get everything; if not, push to create */
+  if(getSyncToken()){
+    if(syncState.gistId){
+      toast('Pulling from sync...');
+      syncPull();
+    }else{
+      toast('Creating sync backup...');
+      syncPush();
+    }
+  }
+};
 $('#fetchModelsBtn').onclick=function(){loadModelsFromForm(true)};
 $('#sModelSearch').oninput=renderModelChoices;$('#sModel').oninput=renderModelChoices;
 $('#sBase').addEventListener('input',function(){renderModelChoices();modelStatus('Endpoint changed. Refresh.')});
@@ -1141,10 +1158,10 @@ $('#rClear').onclick=function(){$('#rContext').value='';var c=getChat();if(c){c.
 /* ===== sync ===== */
 var syncTimer=null;
 function scheduleSyncPush(){if(syncTimer)clearTimeout(syncTimer);syncTimer=setTimeout(function(){syncPush()},25000)}
-function buildSyncPayload(){var pub=Object.assign({},settings);delete pub.key;return{version:1,syncedAt:Date.now(),chats:chats,notes:notes,skills:skills,skillOn:skillOn,settings:pub,activeId:activeId}}
+function buildSyncPayload(){var pub=Object.assign({},settings);return{version:1,syncedAt:Date.now(),chats:chats,notes:notes,skills:skills,skillOn:skillOn,settings:pub,activeId:activeId}}
 function applySyncPayload(data){
   if(data.chats)chats=data.chats;if(data.notes)notes=data.notes;if(data.skills)skills=data.skills;if(data.skillOn)skillOn=data.skillOn;
-  if(data.settings){var keepKey=settings.key;settings=Object.assign({},DEF,data.settings);settings.key=keepKey;saveSettings();applyTheme();applyFont();renderProfile();renderModelLabel()}
+  if(data.settings){settings=Object.assign({},DEF,data.settings);if(!settings.key&&data.settings.key)settings.key=data.settings.key;saveSettings();applyTheme();applyFont();renderProfile();renderModelLabel()}
   if(data.activeId)activeId=data.activeId;
   saveChats();saveNotes();persistSkills();renderSidebar();renderThread();renderSkills();renderSkillBar();renderNotes();
 }
