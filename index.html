@@ -390,7 +390,7 @@ body.sb-closed #menuBtn{display:grid}
 <div class="overlay" id="syncConflictOverlay" style="z-index:150"><div class="modal" style="width:min(600px,94vw)">
   <h2>Sync conflict detected</h2>
   <p id="syncConflictMessage" style="line-height:1.65;color:var(--t2);margin-bottom:12px"></p>
-  <p style="font-size:12px;line-height:1.65;color:var(--t2)">Merge keeps your device settings and retains differing cloud chats as separate copies. Use cloud replaces this device's data; keep device replaces the Gist. Nothing is overwritten without your choice.</p>
+  <p style="font-size:12px;line-height:1.65;color:var(--t2)">Merge combines different chats but honors recorded chat deletions across devices. Use cloud replaces this device's data; keep device replaces the Gist. Nothing is overwritten without your choice.</p>
   <div class="mbtns" style="flex-wrap:wrap;justify-content:stretch">
     <button class="btn" id="syncConflictCancel">Cancel</button>
     <button class="btn" id="syncConflictCloud">Use cloud</button>
@@ -456,6 +456,9 @@ function skillPrompt(){var p=[];skills.forEach(function(s){if(skillOn.indexOf(s.
 
 /* ===== state ===== */
 var chats=load('mimo.chats',[]),activeId=load('mimo.active',null),notes=load('mimo.notes',[]);
+/* Persist deletion markers even after the corresponding chat is removed. */
+var deletedChats=load('mimo.deletedChats',{});
+if(!deletedChats||typeof deletedChats!=='object'||Array.isArray(deletedChats))deletedChats={};
 var pendingAttachments=[],pendingReads=0,attachmentPreview=null;
 var MAX_ATT=8,MAX_FILE=12*1024*1024,MAX_TXT=120000,MAX_TOTAL=240000;
 var qaMode=false,tutorMode=false,streaming=false,controller=null,renderTimer=null;
@@ -664,7 +667,20 @@ function orderedChats(list){return list.slice().sort(function(a,b){return(b.pinn
 function selectChat(c){if(streaming&&c.id!==activeId){toast('Stop generation first');return}activeId=c.id;pendingAttachments=[];renderAttachmentTray();saveChats();renderSidebar();renderThread();document.body.classList.remove('sb-open')}
 function renameChat(c){var p=prompt('Edit name',c.title||'New chat');if(p===null)return;var t=p.trim().slice(0,100);if(!t)return toast('Name cannot be empty');c.title=t;saveChats();renderSidebar();toast('Renamed')}
 function togglePin(c){c.pinned=!c.pinned;if(c.pinned)c.pinnedAt=Date.now();else delete c.pinnedAt;saveChats();renderSidebar();toast(c.pinned?'Pinned':'Unpinned')}
-function deleteChat(c){if(streaming&&c.id===activeId)return toast('Stop first');if(c.messages&&c.messages.length&&!confirm('Delete?'))return;chats=chats.filter(function(x){return x.id!==c.id});if(activeId===c.id)activeId=orderedChats(chats).length?orderedChats(chats)[0].id:null;saveChats();renderSidebar();renderThread();toast('Deleted')}
+function deleteChat(c){
+  if(streaming&&c.id===activeId)return toast('Stop first');
+  if(c.messages&&c.messages.length&&!confirm('Delete this chat on all synced devices?'))return;
+  if(!c.id)return toast('Cannot delete a chat without an ID');
+  /* Deletion is an operation, not just absence from the list. Older devices
+     may still have this ID, so record a durable tombstone before saving. */
+  deletedChats[c.id]=Date.now();
+  save('mimo.deletedChats',deletedChats);
+  chats=chats.filter(function(x){return x.id!==c.id});
+  if(activeId===c.id)activeId=orderedChats(chats).length?orderedChats(chats)[0].id:null;
+  saveChats();renderSidebar();renderThread();toast('Chat deleted · syncing deletion');
+  /* Do not make users wait the usual 25 seconds for a deletion to reach cloud. */
+  scheduleSyncPush(1000);
+}
 function openChatMenu(btn,c){
   var menu=$('#chatMenu');var was=menu.classList.contains('open')&&menu.getAttribute('data-chat')===c.id;closeMenus();if(was)return;
   menu.setAttribute('data-chat',c.id);
@@ -1161,24 +1177,55 @@ $('#rClear').onclick=function(){$('#rContext').value='';var c=getChat();if(c){c.
 
 /* ===== Cross-device Gist sync (verified, conflict-aware) ===== */
 var syncTimer=null, syncBusy=false, syncApplying=false, syncHooksOn=false;
+var syncLastCheck=0;
 var syncConflictResolve=null;
 var SYNC_FILE='studio-sync.json', SYNC_PART_PREFIX='studio-sync-part-';
 var SYNC_PART_SIZE=190000, SYNC_PART_LIMIT=100;
 
-function syncDigest(data){
-  /* Non-cryptographic change detection, not an authentication mechanism. */
-  var s=JSON.stringify({chats:data.chats,notes:data.notes,skills:data.skills,skillOn:data.skillOn,
-    templates:data.templates,settings:data.settings});
+/* Normalized tombstones are deliberately carried indefinitely: old/offline
+   browsers must never be able to resurrect a deleted chat during Merge. */
+function syncDeletionMap(raw){
+  var out=Object.create(null);
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))return out;
+  Object.keys(raw).sort().forEach(function(id){
+    var at=Number(raw[id]);
+    if(id&&id.length<256&&Number.isFinite(at)&&at>0)out[id]=Math.floor(at);
+  });
+  return out;
+}
+function syncMergeDeletions(a,b){
+  var out=syncDeletionMap(a),other=syncDeletionMap(b);
+  Object.keys(other).forEach(function(id){out[id]=Math.max(out[id]||0,other[id])});
+  return syncDeletionMap(out);
+}
+function syncRemoveDeletedChats(items,deletions){
+  var ids=syncDeletionMap(deletions);
+  return (items||[]).filter(function(c){return c&&(!c.id||!Object.prototype.hasOwnProperty.call(ids,c.id))});
+}
+function syncHash(s){
   var h=2166136261;
   for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}
   return s.length.toString(36)+'-'+(h>>>0).toString(16);
 }
+/* Original format's checksum is needed to migrate existing v2 baselines
+   without treating every upgraded device as a conflicting modification. */
+function syncLegacyDigest(data){
+  return syncHash(JSON.stringify({chats:data.chats,notes:data.notes,skills:data.skills,skillOn:data.skillOn,
+    templates:data.templates,settings:data.settings}));
+}
+function syncDigest(data){
+  /* Non-cryptographic change detection, not an authentication mechanism. */
+  return syncHash(JSON.stringify({chats:syncRemoveDeletedChats(data.chats,data.deletedChats),
+    notes:data.notes,skills:data.skills,skillOn:data.skillOn,templates:data.templates,
+    settings:data.settings,deletedChats:syncDeletionMap(data.deletedChats)}));
+}
 function syncCounts(data){
-  return (data.chats||[]).length+' chats, '+(data.notes||[]).length+' notes, '+(data.skills||[]).length+' skills';
+  return (data.chats||[]).length+' chats, '+(data.notes||[]).length+' notes, '+(data.skills||[]).length+' skills, '+Object.keys(syncDeletionMap(data.deletedChats)).length+' deletions';
 }
 function syncMeaningful(data){
   if(!data||typeof data!=='object')return false;
   if((data.chats||[]).some(function(c){return !!((c.messages&&c.messages.length)||(c.brief&&c.brief.trim()))}))return true;
+  if(Object.keys(syncDeletionMap(data.deletedChats)).length)return true;
   if((data.notes||[]).length)return true;
   if((data.skills||[]).some(function(s){return !!s.custom}))return true;
   if((data.skillOn||[]).length)return true;
@@ -1188,10 +1235,11 @@ function syncMeaningful(data){
 }
 function syncValidate(data,allowEmpty){
   if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('Backup is not a JSON object');
-  if(data.version!==1&&data.version!==2)throw new Error('Unsupported backup format/version');
+  if(data.version!==1&&data.version!==2&&data.version!==3)throw new Error('Unsupported backup format/version');
   ['chats','notes','skills','skillOn'].forEach(function(k){if(!Array.isArray(data[k]))throw new Error('Invalid backup: '+k+' is missing or not an array')});
   if(!data.settings||typeof data.settings!=='object'||Array.isArray(data.settings))throw new Error('Invalid backup: settings are missing');
   if(data.templates!==undefined&&!Array.isArray(data.templates))throw new Error('Invalid backup: templates are not an array');
+  if(data.deletedChats!==undefined&&(!data.deletedChats||typeof data.deletedChats!=='object'||Array.isArray(data.deletedChats)))throw new Error('Invalid backup: deletion markers');
   if(data.chats.some(function(c){return !c||typeof c!=='object'||!Array.isArray(c.messages)}))throw new Error('Invalid chat records in backup');
   if(!allowEmpty&&!syncMeaningful(data))throw new Error('Remote backup is empty. Nothing was applied.');
   return data;
@@ -1199,11 +1247,11 @@ function syncValidate(data,allowEmpty){
 function buildSyncPayload(){
   /* Explicitly include the API key in the backup, as requested. The Gist is NOT encrypted. */
   var pub=Object.assign({},settings);
-  return {version:2,syncedAt:Date.now(),chats:chats,notes:notes,skills:skills,skillOn:skillOn,
-    templates:TPL,settings:pub,activeId:activeId};
+  return {version:3,syncedAt:Date.now(),chats:syncRemoveDeletedChats(chats,deletedChats),notes:notes,skills:skills,skillOn:skillOn,
+    templates:TPL,settings:pub,activeId:activeId,deletedChats:syncDeletionMap(deletedChats)};
 }
 function syncSetGistId(id){
-  if(syncState.gistId!==(id||'')){syncState.baseDigest='';save('mimo.syncBaseDigest','')}
+  if(syncState.gistId!==(id||'')){syncState.baseDigest='';save('mimo.syncBaseDigest','');save('mimo.syncDigestVersion',3)}
   syncState.gistId=id||'';
   save('mimo.gistId',syncState.gistId);
 }
@@ -1212,13 +1260,14 @@ function syncSetBaseline(data){
   syncState.lastSync=Date.now();
   syncState.notice='';
   save('mimo.syncBaseDigest',syncState.baseDigest);
+  save('mimo.syncDigestVersion',3);
   save('mimo.lastSync',syncState.lastSync);
   updateSyncStatus();
 }
-function scheduleSyncPush(){
+function scheduleSyncPush(delay){
   if(!syncHooksOn||syncApplying||!getSyncToken())return;
   if(syncTimer)clearTimeout(syncTimer);
-  syncTimer=setTimeout(function(){syncTimer=null;syncPush(true)},25000);
+  syncTimer=setTimeout(function(){syncTimer=null;syncPush(true)},typeof delay==='number'?delay:25000);
 }
 function syncHeaders(token){return {'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':'2022-11-28'}}
 async function syncRequest(token,url,opts){
@@ -1342,7 +1391,8 @@ function applySyncPayload(data){
   if(streaming)throw new Error('Stop the current model response before pulling a backup');
   syncApplying=true;
   try{
-    chats=data.chats;
+    deletedChats=syncDeletionMap(data.deletedChats);
+    chats=syncRemoveDeletedChats(data.chats,deletedChats);
     notes=data.notes;
     skills=data.skills;
     skillOn=data.skillOn;
@@ -1352,6 +1402,7 @@ function applySyncPayload(data){
     if(!Object.prototype.hasOwnProperty.call(data.settings,'key'))settings.key=oldKey;
     activeId=data.activeId&&chats.some(function(c){return c.id===data.activeId})?data.activeId:(chats[0]?chats[0].id:null);
     pendingAttachments=[];renderAttachmentTray();
+    save('mimo.deletedChats',deletedChats);
     saveSettings();saveChats();saveNotes();persistSkills();saveTpls();
     applyTheme();applyFont();renderProfile();renderModelLabel();renderSidebar();renderThread();
     renderSkills();renderSkillBar();renderNotes();
@@ -1385,13 +1436,18 @@ function syncMergeUnique(local,remote,idField){
 function syncMergeRemote(data){
   syncApplying=true;
   try{
-    chats=syncMergeUnique(chats,data.chats,'id');
+    deletedChats=syncMergeDeletions(deletedChats,data.deletedChats);
+    /* Filter BEFORE merging: otherwise a differing cloud copy of a deleted
+       ID could be assigned a new ID and silently resurrect the chat. */
+    chats=syncMergeUnique(syncRemoveDeletedChats(chats,deletedChats),
+      syncRemoveDeletedChats(data.chats,deletedChats),'id');
     notes=syncMergeUnique(notes,data.notes,'id');
     skills=syncMergeUnique(skills,data.skills,'id');
     skillOn=Array.from(new Set(skillOn.concat(data.skillOn)));
     if(Array.isArray(data.templates))TPL=syncMergeUnique(TPL,data.templates,'id');
     /* Keep this device's settings; recover its missing API key from cloud. */
     if(!settings.key&&data.settings.key)settings.key=data.settings.key;
+    save('mimo.deletedChats',deletedChats);
     saveChats();saveNotes();persistSkills();saveTpls();saveSettings();
     applyTheme();applyFont();renderProfile();renderModelLabel();renderSidebar();renderThread();
     renderSkills();renderSkillBar();renderNotes();
@@ -1414,7 +1470,7 @@ async function syncRun(mode,automatic){
   if(!token){if(!automatic)toast('No sync token. Add a GitHub PAT in Settings.');return false}
   if(syncBusy){if(!automatic)toast('Sync already in progress');return false}
   if(streaming){if(!automatic)toast('Stop the current response before syncing');return false}
-  syncBusy=true;
+  syncBusy=true;syncLastCheck=Date.now();
   if(syncTimer){clearTimeout(syncTimer);syncTimer=null}
   updateSyncStatus('Checking GitHub backup...');
   try{
@@ -1441,19 +1497,27 @@ async function syncRun(mode,automatic){
       local=buildSyncPayload();
     }
     var ld=syncDigest(local),rd=syncDigest(data),base=syncState.baseDigest;
+    /* Keep old v2 conflict baselines valid until the first successful v3 sync. */
+    var oldBaseline=!!base&&load('mimo.syncDigestVersion',0)!==3;
+    var comparableLD=oldBaseline?syncLegacyDigest(local):ld;
+    var comparableRD=oldBaseline?syncLegacyDigest(data):rd;
     /* Never upload an empty freshly initialized device over a meaningful cloud backup. */
     if(!wasMeaningful&&syncMeaningful(data)){
       applySyncPayload(data);syncSetBaseline(data);toast('Restored from GitHub · '+syncCounts(data));return true;
     }
     if(ld===rd){syncSetBaseline(data);if(!automatic)toast('Already in sync · '+syncCounts(data));return true}
-    var localChanged=base?ld!==base:wasMeaningful;
-    var remoteChanged=base?rd!==base:syncMeaningful(data);
+    var localChanged=base?comparableLD!==base:wasMeaningful;
+    var remoteChanged=base?comparableRD!==base:syncMeaningful(data);
     if(!localChanged&&remoteChanged){
       applySyncPayload(data);syncSetBaseline(data);toast('Restored from GitHub · '+syncCounts(data));return true;
     }
     if(localChanged&&!remoteChanged){
-      /* On an explicit Pull, never silently replace remote data with local. */
-      if(mode==='pull'){toast('Cloud backup unchanged; local changes retained. Use Sync now to upload.');return false}
+      /* A phone may close before its queued delete upload. On the next tab
+         launch, recover this unsynced local change automatically, but only
+         when the cloud still matches the last known baseline. */
+      if(mode==='pull'&&!automatic){
+        toast('Cloud unchanged; local edits retained. Use Sync now to upload.');return false;
+      }
       await syncWrite(token,buildSyncPayload(),remote);return true;
     }
     var choice=await syncConflictDialog(local,data);
@@ -1488,11 +1552,23 @@ async function syncAfterTokenSaved(){
   /* syncPull returns false for no remote; check again using the same account and create only if it truly has no backup. */
   if(!syncState.gistId&&syncMeaningful(buildSyncPayload()))await syncPush(true);
 }
+/* Existing desktop tabs do not receive GitHub events. Refresh from the same
+   Gist when users return to the tab and periodically while it is visible. */
+function syncCheckWhenActive(){
+  if(!syncHooksOn||syncApplying||syncBusy||streaming||!getSyncToken())return;
+  if(document.visibilityState==='hidden')return;
+  if(Date.now()-syncLastCheck<12000)return;
+  syncLastCheck=Date.now();
+  syncPull(true);
+}
+window.addEventListener('focus',syncCheckWhenActive);
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')syncCheckWhenActive()});
+setInterval(function(){if(document.visibilityState==='visible')syncCheckWhenActive()},90000);
 /* Hook persistent data writes so saved skills, notes, templates and settings all auto-sync. */
 var syncOriginalSave=save;
 save=function(k,v){
   syncOriginalSave(k,v);
-  if(syncHooksOn&&!syncApplying&&/^(mimo\.(chats|active|notes|skills|skillOn|settings|tpls))$/.test(k))scheduleSyncPush();
+  if(syncHooksOn&&!syncApplying&&/^(mimo\.(chats|notes|skills|skillOn|settings|tpls|deletedChats))$/.test(k))scheduleSyncPush();
 };
 
 /* ===== theme & help ===== */
@@ -1521,7 +1597,8 @@ document.querySelectorAll('.overlay').forEach(function(o){o.addEventListener('cl
 /* ===== boot + self-test ===== */
 try{
   applyTheme();applyFont();renderProfile();renderModelLabel();renderSkills();renderSkillBar();renderNotes();
-  if(!chats.length)newChat();else{if(!getChat())activeId=chats[0].id;renderSidebar();renderThread()}
+  if(!chats.length&&!Object.keys(syncDeletionMap(deletedChats)).length)newChat();
+  else{if(chats.length&&!getChat())activeId=chats[0].id;renderSidebar();renderThread()}
   renderAttachmentTray();setSend();updateStats();
   syncHooksOn=true;
   if(getSyncToken())setTimeout(function(){syncPull(true)},800);
